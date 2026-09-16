@@ -1,104 +1,75 @@
 <?php
+
 /**
- * Copyright © Magento, Inc. All rights reserved.
- * See COPYING.txt for license details.
+ * @category    ScandiPWA
+ * @package     ScandiPWA_CompareGraphQl
+ * @copyright   Copyright © Magento, Inc. All rights reserved.
+ * @copyright   Modifications © Selveq. All rights reserved.
+ * @license     OSL-3.0 (Open Software License ("OSL") v. 3.0)
+ * See LICENSE for license details.
  */
+
 declare(strict_types=1);
 
 namespace ScandiPWA\CompareGraphQl\Model\Service;
 
+use Magento\Catalog\Api\Data\ProductInterface;
 use Magento\Catalog\Block\Product\Compare\ListCompare;
+use Magento\Catalog\Helper\Image;
 use Magento\Catalog\Model\Product;
 use Magento\Catalog\Model\ProductRepository;
 use Magento\CompareListGraphQl\Model\Service\Collection\GetComparableItemsCollection as ComparableItemsCollection;
+use Magento\CompareListGraphQl\Model\Service\GetComparableItems as SourceGetComparableItems;
+use Magento\Eav\Model\Entity\Attribute\AbstractAttribute;
 use Magento\Framework\App\Area;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Framework\GraphQl\Exception\GraphQlInputException;
 use Magento\Framework\GraphQl\Query\Resolver\ContextInterface;
-use Magento\CompareListGraphQl\Model\Service\GetComparableItems as SourceGetComparableItems;
-use Magento\Catalog\Helper\Image;
+use Magento\Framework\Phrase;
 use Magento\Store\Model\App\Emulation;
 use Magento\Store\Model\StoreManagerInterface;
+use RuntimeException;
 
-/**
- * Get products compare list
- */
 class GetComparableItems extends SourceGetComparableItems
 {
-    /**
-     * @var ListCompare
-     */
-    private $blockListCompare;
-
-    /**
-     * @var ComparableItemsCollection
-     */
-    private $comparableItemsCollection;
-
-    /**
-     * @var ProductRepository
-     */
-    private $productRepository;
-
-    /**
-     * @var Image
-     */
-    protected $_imageBuilder;
-
-    /**
-     * @var StoreManagerInterface
-     */
-    protected $storeManager;
-
-    /**
-     * @var Emulation
-     */
-    protected $emulation;
+    // each type resolves against its own product attribute, so a product may carry three different files
+    private const array IMAGE_TYPES = ['thumbnail', 'small_image', 'image'];
 
     /**
      * @param ListCompare $listCompare
      * @param ComparableItemsCollection $comparableItemsCollection
      * @param ProductRepository $productRepository
-     * @param Image $_imageBuilder
+     * @param Image $imageBuilder
      * @param StoreManagerInterface $storeManager
      * @param Emulation $emulation
      */
     public function __construct(
         ListCompare $listCompare,
-        ComparableItemsCollection $comparableItemsCollection,
-        ProductRepository $productRepository,
-        Image $_imageBuilder,
-        StoreManagerInterface $storeManager,
-        Emulation $emulation
+        private readonly ComparableItemsCollection $comparableItemsCollection,
+        private readonly ProductRepository $productRepository,
+        private readonly Image $imageBuilder,
+        private readonly StoreManagerInterface $storeManager,
+        private readonly Emulation $emulation
     ) {
         parent::__construct($listCompare, $comparableItemsCollection, $productRepository);
-
-        $this->blockListCompare = $listCompare;
-        $this->comparableItemsCollection = $comparableItemsCollection;
-        $this->productRepository = $productRepository;
-        $this->_imageBuilder=$_imageBuilder;
-        $this->storeManager = $storeManager;
-        $this->emulation = $emulation;
     }
 
     /**
-     * Get comparable items
-     *
-     * @param int $listId
-     * @param ContextInterface $context
-     *
-     * @return array
-     * @throws GraphQlInputException
+     * core's two helpers are private, so overriding this loop is what binds it to the ones below
+     * {@inheritdoc}
      */
     public function execute(int $listId, ContextInterface $context)
     {
+        $itemsCollection = $this->comparableItemsCollection->execute($listId, $context);
+        $comparableAttributes = $itemsCollection->getComparableAttributes();
+
         $items = [];
-        foreach ($this->comparableItemsCollection->execute($listId, $context) as $item) {
+        foreach ($itemsCollection as $item) {
             /** @var Product $item */
             $items[] = [
                 'uid' => $item->getId(),
                 'product' => $this->getProductData((int)$item->getId()),
-                'attributes' => $this->getProductComparableAttributes($listId, $item, $context)
+                'attributes' => $this->getProductComparableAttributes($item, $comparableAttributes)
             ];
         }
 
@@ -106,63 +77,119 @@ class GetComparableItems extends SourceGetComparableItems
     }
 
     /**
-     * Get product data
-     *
      * @param int $productId
      * @return array
      * @throws GraphQlInputException
+     * @throws RuntimeException
      */
     private function getProductData(int $productId): array
     {
-        $productData = [];
         try {
             $item = $this->productRepository->getById($productId);
-            $imagePath = $item->getData('thumbnail');
-
-            $productData = $item->getData();
-            $productData['entity_id'] = $item->getId();
-            $productData['model'] = $item;
-            $productData['stock_item'] = [];
-            $productData['stock_status'] = $item['quantity_and_stock_status']['is_in_stock'] ? 'IN_STOCK' : 'OUT_OF_STOCK';
-            $productData['categories'] = [];
-            $productData['attributes'] = [];
-            $productData['tier_prices'] = [];
-            $productData['thumbnail'] = [
-                'path' => $imagePath,
-                'url' => $this->getImageUrl('thumbnail', $imagePath, $item)
-            ];
-            $productData['small_image'] = [
-                'path' => $imagePath,
-                'url' => $this->getImageUrl('small_image', $imagePath, $item)
-            ];
-            $productData['image'] = [
-                'path' => $imagePath,
-                'url' => $this->getImageUrl('image', $imagePath, $item)
-            ];
         } catch (LocalizedException $e) {
             throw new GraphQlInputException(__($e->getMessage()));
+        }
+
+        if (!$item instanceof Product) {
+            throw new RuntimeException(sprintf(
+                'product %d loaded as %s, which carries none of the data this resolver reads',
+                $productId,
+                get_debug_type($item)
+            ));
+        }
+
+        $productData = $item->getData();
+        $productData['model'] = $item;
+        $productData['stock_status'] = $this->getStockStatus($item);
+
+        foreach ($this->getImageUrls($item) as $imageType => $url) {
+            $productData[$imageType] = [
+                'path' => $item->getData($imageType),
+                'url' => $url
+            ];
         }
 
         return $productData;
     }
 
     /**
-     * Get comparable attributes for product
-     *
-     * @param int $listId
+     * ProductInterface, not Product: only the interface documents the product's own extension attributes
+     * @param ProductInterface $product
+     * @return string
+     * @throws RuntimeException
+     */
+    private function getStockStatus(ProductInterface $product): string
+    {
+        $stockItem = $product->getExtensionAttributes()->getStockItem();
+
+        if ($stockItem === null) {
+            throw new RuntimeException(sprintf(
+                'no stock item on product %d, so the extension attribute was not populated',
+                (int)$product->getId()
+            ));
+        }
+
+        return $stockItem->getIsInStock() ? 'IN_STOCK' : 'OUT_OF_STOCK';
+    }
+
+    /**
+     * starting emulation reloads the store design, so the three builds share one cycle
      * @param Product $product
-     * @param ContextInterface $context
-     *
+     * @return string[]
+     */
+    private function getImageUrls(Product $product): array
+    {
+        $storeId = $this->storeManager->getStore()->getId();
+        $urls = [];
+
+        try {
+            $this->emulation->startEnvironmentEmulation($storeId, Area::AREA_FRONTEND, true);
+
+            foreach (self::IMAGE_TYPES as $imageType) {
+                $urls[$imageType] = $this->getImageUrl($imageType, $product);
+            }
+        } finally {
+            $this->emulation->stopEnvironmentEmulation();
+        }
+
+        return $urls;
+    }
+
+    /**
+     * runs inside the caller's emulation, so the image config it reads is the frontend theme's
+     * @param string $imageType
+     * @param Product $product
+     * @return string
+     */
+    private function getImageUrl(string $imageType, Product $product): string
+    {
+        $imagePath = $product->getData($imageType);
+
+        if (!isset($imagePath) || $imagePath === 'no_selection') {
+            return $this->imageBuilder->getDefaultPlaceholderUrl($imageType);
+        }
+
+        return $this->imageBuilder
+            ->init($product, sprintf('scandipwa_%s', $imageType), ['type' => $imageType])
+            ->constrainOnly(true)
+            ->keepAspectRatio(true)
+            ->keepTransparency(true)
+            ->keepFrame(false)
+            ->getUrl();
+    }
+
+    /**
+     * @param Product $product
+     * @param AbstractAttribute[] $comparableAttributes
      * @return array
      */
-    private function getProductComparableAttributes(int $listId, Product $product, ContextInterface $context): array
+    private function getProductComparableAttributes(Product $product, array $comparableAttributes): array
     {
         $attributes = [];
-        $itemsCollection = $this->comparableItemsCollection->execute($listId, $context);
-        foreach ($itemsCollection->getComparableAttributes() as $item) {
+        foreach ($comparableAttributes as $attribute) {
             $attributes[] = [
-                'code' =>  $item->getAttributeCode(),
-                'value' => $this->blockListCompare->getProductAttributeValue($product, $item)
+                'code' => $attribute->getAttributeCode(),
+                'value' => $this->getAttributeValue($product, $attribute)
             ];
         }
 
@@ -170,40 +197,27 @@ class GetComparableItems extends SourceGetComparableItems
     }
 
     /**
-     * @param string $imageType
-     * @param string|null $imagePath
-     * @param $product
-     * @return string
+     * the rule of ListCompare::getProductAttributeValue(), answering null where core answers its N/A sentinel
+     * @param Product $product
+     * @param AbstractAttribute $attribute
+     * @return Phrase|string|null
      */
-    protected function getImageUrl(
-        string $imageType,
-        ?string $imagePath,
-        $product
-    ): string {
-        $storeId = $this->storeManager->getStore()->getId();
-        $this->emulation->startEnvironmentEmulation($storeId, Area::AREA_FRONTEND, true);
+    private function getAttributeValue(Product $product, AbstractAttribute $attribute): Phrase|string|null
+    {
+        $code = $attribute->getAttributeCode();
 
-        if (!isset($imagePath) || $imagePath == 'no_selection') {
-            $imageUrl = $this->_imageBuilder->getDefaultPlaceholderUrl($imageType);
-            $this->emulation->stopEnvironmentEmulation();
-            return $imageUrl;
+        if (!$product->hasData($code)) {
+            return null;
         }
 
-        $imageId = sprintf('scandipwa_%s', $imageType);
+        $usesOptions = $attribute->getSourceModel()
+            || in_array($attribute->getFrontendInput(), ['select', 'boolean', 'multiselect']);
+        $value = $usesOptions ? $attribute->getFrontend()->getValue($product) : $product->getData($code);
 
-        $image = $this->_imageBuilder
-            ->init(
-                $product,
-                $imageId,
-                ['type' => $imageType]
-            )
-            ->constrainOnly(true)
-            ->keepAspectRatio(true)
-            ->keepTransparency(true)
-            ->keepFrame(false);
+        if (is_array($value)) {
+            return null;
+        }
 
-        $this->emulation->stopEnvironmentEmulation();
-
-        return $image->getUrl();
+        return (string)$value === '' ? __('No') : (string)$value;
     }
 }

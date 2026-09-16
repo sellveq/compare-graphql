@@ -1,30 +1,51 @@
 {
-    "name": "scandipwa/compare-graphql",
-    "description": "N/A",
+    "name": "selveq/compare-graphql",
+    "description": "Magento 2 Compare GraphQl extension for ScandiPWA theme",
     "type": "magento2-module",
-    "require": {
-        "magento/magento2-base": "^2.3.1"
-    },
-    "support": {
-        "source": "https://github.com/scandipwa/compare-graphql",
-        "email": "info@scandiweb.com"
-    },
+    "version": "2.0.0",
+    "license": [
+        "OSL-3.0"
+    ],
     "authors": [
         {
-            "name": "Zhan Lyaksa",
-            "email": "zans.laksa@scandiweb.com"
+            "name": "Scandiweb",
+            "homepage": "https://scandiweb.com",
+            "role": "Original author"
+        },
+        {
+            "name": "Selveq",
+            "homepage": "https://selveq.com",
+            "role": "Maintainer"
         }
     ],
-    "license": [
-      "OSL-3.0",
-      "AFL-3.0"
-    ],
+    "support": {
+        "issues": "https://github.com/selveq/compare-graphql/issues",
+        "source": "https://github.com/selveq/compare-graphql"
+    },
+    "require": {
+        "php": "^8.3",
+        "magento/framework": "^103.0",
+        "magento/module-compare-list-graph-ql": "^100.4",
+        "magento/module-catalog": "^104.0",
+        "magento/module-catalog-inventory": "^100.4",
+        "magento/module-store": "^101.1",
+        "selveq/performance": "^2.0"
+    },
+    "replace": {
+        "scandipwa/compare-graphql": "*"
+    },
     "autoload": {
-      "files": [
-        "src/registration.php"
-      ],
-      "psr-4": {
-        "ScandiPWA\\CompareGraphQl\\": "src"
-      }
+        "files": [
+            "src/registration.php"
+        ],
+        "psr-4": {
+            "ScandiPWA\\CompareGraphQl\\": "src/"
+        }
+    },
+    "archive": {
+        "exclude": [
+            "/.github",
+            "/.gitignore"
+        ]
     }
 }
